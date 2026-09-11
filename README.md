@@ -147,19 +147,6 @@ JSON and text reports are saved under `document-page-count-reports/`. The comman
 
 Shared library used by the other API scripts. It centralizes URL/token normalization, UUID checks, bounded GET retries, common response-envelope parsing, and repeated-page protection. It is not normally run directly.
 
-## Original-to-new filename mapping
-
-| Original file | New location | Change |
-| --- | --- | --- |
-| `delete_collection.py` | `scripts/delete_project_and_collection.py` | Clarifies that it also archives the project; adds preview and UUID/name validation. |
-| `delete_collection_entities.py` | `scripts/purge_collection_resources.py` | Fixes filtering, previews, summaries, pagination, and document deletion. |
-| `delete_from_collection.py` | Consolidated into `scripts/purge_collection_resources.py` | Removes duplicated curl logic, fixed IDs, and the hard-coded JWT. |
-| `ensure_loan_in_broker_portal.py` | `scripts/sync_loan_to_pipeline.py` | Adds dry-run mode, schema checks, name override, and optional initialization. |
-| `split.py` | `scripts/split_pdf_by_start_pages.py` | Adds clear semantics, file-based breakpoints, overwrite protection, and output verification. |
-| `validate_document_page_counts.py` | `scripts/validate_document_page_counts.py` | Removes embedded credentials, queries both document types, resolves loans safely, and emits clean reports. |
-
-Generated reports, caches, `__pycache__`, and instance-specific JSON fixtures from the old `test/` directory are intentionally excluded.
-
 ## Development checks
 
 ```bash
