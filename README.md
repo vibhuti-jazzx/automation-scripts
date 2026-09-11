@@ -4,6 +4,8 @@ Small command-line utilities for JazzX loan demos, Knowledge Hub cleanup, mock-p
 
 The scripts are instance-neutral: no gateway URL, collection ID, project ID, loan number, or JWT is embedded in this repository. Destructive commands perform a dry run unless their explicit execution flag is supplied.
 
+Python 3.10 or newer is required.
+
 ## Setup
 
 ```bash
@@ -146,6 +148,133 @@ JSON and text reports are saved under `document-page-count-reports/`. The comman
 ### `scripts/jazzx_api.py`
 
 Shared library used by the other API scripts. It centralizes URL/token normalization, UUID checks, bounded GET retries, common response-envelope parsing, and repeated-page protection. It is not normally run directly.
+
+## Loan creation and cloning
+
+The following commands use the payload builders in `entity_creators/`. Set the target instance and a current token first:
+
+```bash
+export JAZZX_GATEWAY_URL="https://poc-gw.jazzx.co"
+export JAZZX_TOKEN="<current JWT>"
+```
+
+### `loan-clone-automation/add_loan_mock_data.py`
+
+Creates or reuses an Assistant project, upserts its mortgage entities, and adds or repairs its row in the mock-server loan pipeline. Ontology UUIDs are resolved by stable ontology name in the selected instance, so environment-specific IDs are not hard-coded.
+
+Validate the input locally without API calls:
+
+```bash
+python3 loan-clone-automation/add_loan_mock_data.py \
+  --input "stockton-loans/Loan12/5310308674_loan.json" \
+  --validate-only
+```
+
+Create/update the project, entities, and pipeline row:
+
+```bash
+python3 loan-clone-automation/add_loan_mock_data.py \
+  --input "stockton-loans/Loan12/5310308674_loan.json" \
+  --project-name 5310308674_1 \
+  --initialize-pipeline-mock
+```
+
+If an existing project response does not contain its Knowledge Hub collection, pass the known collection explicitly:
+
+```bash
+python3 loan-clone-automation/add_loan_mock_data.py \
+  --input loan.json \
+  --project-name 5310308674_1 \
+  --collection-id 28e49cd4-6c1d-4b9d-a1d8-9bc8ae7e8565
+```
+
+Useful modes:
+
+- `--pipeline-only` leaves Knowledge Hub entities unchanged and only adds/repairs the pipeline row.
+- `--skip-pipeline-update` creates/updates project entities without touching the pipeline mock.
+- `--loan-id <project UUID> --collection-id <collection UUID>` targets an existing project directly.
+- `--project-name` is also the loan number displayed in the pipeline.
+
+The script validates input before making network calls, rejects invalid UUIDs and ambiguous duplicate projects/entities, retrieves every API page, and stops on an entity failure instead of presenting a partial loan as successful. Entity IDs and names are deterministic for repeatable runs; legacy randomized entities are matched using stable business fields when the match is unambiguous. `Conv` is supported for Freddie Mac loans, and `mortgageType` is read from `loan.loanProduct`.
+
+### `loan-clone-automation/loan_clone.py`
+
+Clones every Knowledge Hub entity from a reference loan into a newly created project. It rewrites loan/project/collection identifiers and entity relationships, including circular references, then verifies the resulting entities.
+
+Preview from an exported entity file without API writes:
+
+```bash
+python3 loan-clone-automation/loan_clone.py \
+  --source-file source_entities.json \
+  --target-loan-number 1441010_1 \
+  --dry-run \
+  --output clone_preview.json
+```
+
+Clone a live loan when its collection is known:
+
+```bash
+python3 loan-clone-automation/loan_clone.py \
+  --reference-loan-number 1441010 \
+  --target-loan-number 1441010_1 \
+  --source-collection-id <source collection UUID> \
+  --project-name 1441010_1
+```
+
+Alternatively, pass `--dashboard-collection-id` to locate the source collection through its `LoanProject`. `--validate-only` performs source checks without creating a project. Semantic warnings block creation unless explicitly reviewed with `--allow-validation-warnings`. Active duplicate project names, duplicate entity IDs, invalid UUIDs, malformed pagination, and a target equal to the reference loan are rejected.
+
+### `loan-clone-automation/reconstruct_loan_json.py`
+
+Reads an existing loan’s Knowledge Hub entities and reconstructs the raw loan JSON format accepted by the entity creators. It validates the result and can upload it to an existing collection or create a new Assistant project first.
+
+Inspect source entities using GET requests only:
+
+```bash
+python3 loan-clone-automation/reconstruct_loan_json.py \
+  --loan-number 1441010 \
+  --source-collection-id <source collection UUID> \
+  --inspect
+```
+
+Reconstruct and validate without any remote write:
+
+```bash
+python3 loan-clone-automation/reconstruct_loan_json.py \
+  --loan-number 1441010 \
+  --source-collection-id <source collection UUID> \
+  --dry-run \
+  --output reconstructed_1441010.json
+```
+
+Create a project and upload the validated document:
+
+```bash
+python3 loan-clone-automation/reconstruct_loan_json.py \
+  --loan-number 1441010 \
+  --source-collection-id <source collection UUID> \
+  --create-project \
+  --project-name 1441010_reconstructed \
+  --output reconstructed_1441010.json
+```
+
+The remote document is stored as a uniquely named `.txt` because affected Knowledge Hub environments reject `.json` uploads; its content remains formatted JSON. The command validates UUIDs, safe filename characters, duplicate projects, response envelopes, repeated pages, timeouts, and local output directories.
+
+### `loan-clone-automation/validate_input.py`
+
+Validates a raw loan JSON file against the fields, types, ranges, and enums required by the entity payload builders. This command is local and makes no API calls.
+
+```bash
+python3 loan-clone-automation/validate_input.py \
+  --input loan.json \
+  --verbose \
+  --output validation_report.json
+```
+
+Use `--json-output` to print machine-readable results. Exit code `0` means no validation errors; exit code `1` means invalid input. Boolean and non-finite values are rejected for numeric fields, and `Conv` is accepted as the Freddie Mac loan-type key.
+
+### `entity_creators/`
+
+Internal Pydantic payload builders used by `add_loan_mock_data.py`. They build and validate `LoanProject`, `LoanCore`, borrower, asset, income, liability, subject property, employment, credit report, loan application, and loan-details entities. This directory is a library and is not invoked directly.
 
 ## Development checks
 
