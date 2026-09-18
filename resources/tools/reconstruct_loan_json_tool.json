@@ -1,0 +1,20 @@
+{
+  "code_params": [
+    {
+      "param_name": "loan_number",
+      "param_type": "str",
+      "param_description": "Existing source loan number. The tool locates its collection automatically."
+    },
+    {
+      "param_name": "target_loan_number",
+      "param_type": "str",
+      "param_description": "New loan number written into the reconstructed document."
+    },
+    {
+      "param_name": "access_token",
+      "param_type": "str",
+      "param_description": "Valid target-instance bearer JWT used to create the destination Assistant dashboard project. Enter the token only, without the 'Bearer ' prefix."
+    }
+  ],
+  "output_schema": null
+}

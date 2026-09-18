@@ -1,0 +1,7 @@
+name: clone_loan_entities_tool
+description: Clone all Knowledge Hub entities from one loan collection to another, remapping entity references and applying a new loan number.
+executable: resources/tools/clone_loan_entities_tool.py
+output_schema: resources/tools/clone_loan_entities_tool.json#output_schema
+code_params: resources/tools/clone_loan_entities_tool.json#code_params
+type: script
+stop_flow_if_fail: false

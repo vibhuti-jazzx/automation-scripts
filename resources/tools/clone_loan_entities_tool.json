@@ -1,0 +1,8 @@
+{
+  "code_params": [
+    {"param_name": "loan_number", "param_type": "str", "param_description": "New loan number written into cloned entity JSON."},
+    {"param_name": "source_collection_id", "param_type": "str", "param_description": "Collection containing source loan entities."},
+    {"param_name": "target_collection_id", "param_type": "str", "param_description": "Collection that will receive cloned entities."}
+  ],
+  "output_schema": null
+}

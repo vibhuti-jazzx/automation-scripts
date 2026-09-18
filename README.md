@@ -23,6 +23,24 @@ Tokens expire and must never be committed. You may pass `--gateway-url` and `--t
 
 ## Script reference
 
+### `scripts/xml_to_loan_json.py`
+
+Converts a MISMO 3.4 XML export into the deterministic `project_details`,
+`loan_core`, `borrowers`, `subject_property`, and optional `loan_details`
+format used by the loan automation. It uses only Python's standard library;
+there is no LLM call, network dependency, or external prompt. Values absent
+from the XML are omitted rather than guessed.
+
+```bash
+python3 scripts/xml_to_loan_json.py \
+  "path/to/Loan 3.4.xml" \
+  --output "path/to/loan.json"
+```
+
+Use `--omit-loan-details` when only the core entity payload is needed. The
+summary is printed to stderr, while JSON is written to stdout if `--output` is
+omitted.
+
 ### `scripts/delete_project_and_collection.py`
 
 Deletes a Knowledge Hub collection and archives the related Assistant project. Project names are resolved across all API pages; ambiguous names are rejected. A direct `--project-id` must be a dashboard UUID, not a loan number or project name.

@@ -1,0 +1,7 @@
+name: create_loan_from_document_tool
+description: Read and validate a JSON document, then create all loan entities directly in the supplied Knowledge Hub collection without using the mock server.
+executable: resources/tools/create_loan_from_document_tool.py
+output_schema: resources/tools/create_loan_from_document_tool.json#output_schema
+code_params: resources/tools/create_loan_from_document_tool.json#code_params
+type: script
+stop_flow_if_fail: false

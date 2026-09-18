@@ -1,0 +1,20 @@
+{
+  "code_params": [
+    {
+      "param_name": "source_collection_id",
+      "param_type": "str",
+      "param_description": "Collection ID that contains document_id. The tool verifies this before reading the document."
+    },
+    {
+      "param_name": "target_collection_id",
+      "param_type": "str",
+      "param_description": "Destination collection ID where the validated loan entities will be created."
+    },
+    {
+      "param_name": "document_id",
+      "param_type": "str",
+      "param_description": "Document ID of the uploaded JSON-text loan input."
+    }
+  ],
+  "output_schema": null
+}

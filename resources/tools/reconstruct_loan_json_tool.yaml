@@ -1,0 +1,7 @@
+name: reconstruct_loan_json_tool
+description: Reconstruct a validated raw loan JSON document from Knowledge Hub entities and store it in another collection.
+executable: resources/tools/reconstruct_loan_json_tool.py
+output_schema: resources/tools/reconstruct_loan_json_tool.json#output_schema
+code_params: resources/tools/reconstruct_loan_json_tool.json#code_params
+type: script
+stop_flow_if_fail: false
