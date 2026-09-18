@@ -41,6 +41,16 @@ Use `--omit-loan-details` when only the core entity payload is needed. The
 summary is printed to stderr, while JSON is written to stdout if `--output` is
 omitted.
 
+### `resources/tools/`
+
+This directory contains the Builder Studio tool bundles migrated from the
+loan-clone automation project. Each tool includes its Python implementation,
+JSON parameter definition, and YAML manifest:
+
+- `clone_loan_entities_tool`
+- `create_loan_from_document_tool`
+- `reconstruct_loan_json_tool`
+
 ### `scripts/delete_project_and_collection.py`
 
 Deletes a Knowledge Hub collection and archives the related Assistant project. Project names are resolved across all API pages; ambiguous names are rejected. A direct `--project-id` must be a dashboard UUID, not a loan number or project name.
