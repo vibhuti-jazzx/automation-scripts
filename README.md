@@ -229,6 +229,14 @@ The script validates input before making network calls, rejects invalid UUIDs an
 
 Clones every Knowledge Hub entity from a reference loan into a newly created project. It rewrites loan/project/collection identifiers and entity relationships, including circular references, then verifies the resulting entities.
 
+Use `--remove-macer` to exclude only the MACER workflow entities (`MacerInvocationEvent`, `Finding`, `FindingSet`, `LoanFindingsSummary`, `Condition`, and `MergedConditionSet`). Document-related entities such as `SourceDocument`, `ClassifiedDocument`, `PageCollection`, and `LoanDocumentScope` are retained. The result includes the number and types of omitted entities.
+
+Use `--copy-documents` to copy the source collection's document files—including source and split documents—into the target collection. The upload is started but asynchronous document processing is not awaited, so queued processing does not block the entity clone. Knowledge Hub exposes no per-document download URL, so files are fetched through the collection download endpoint, which returns a zip archive even for a single document.
+
+`--workers` (default 4) sets how many documents are copied in parallel. `--document-timeout` (default 600s) is a wall-clock deadline for one document's download or upload; a document that exceeds it is reported as failed and the run continues, with the full list in the `--output` file. On a resumed run, documents already present in the target are matched by `meta_data.source_document_id`, falling back to filename and size. If the target holds documents but none can be matched, the run stops rather than duplicate the collection; `--allow-duplicate-documents` overrides that.
+
+If the requested project name already exists as one active project, the script resumes it instead of failing. Entities created by this script have stable names, so a rerun reuses and updates existing entities and creates only missing ones. If the project API omits the existing collection ID, pass it with `--target-collection-id` (this is different from `--source-collection-id`). The request `--timeout` is applied to each API call; it does not limit the complete clone duration.
+
 Preview from an exported entity file without API writes:
 
 ```bash
@@ -246,7 +254,8 @@ python3 loan-clone-automation/loan_clone.py \
   --reference-loan-number 1441010 \
   --target-loan-number 1441010_1 \
   --source-collection-id <source collection UUID> \
-  --project-name 1441010_1
+  --project-name 1441010_1 \
+  --remove-macer
 ```
 
 Alternatively, pass `--dashboard-collection-id` to locate the source collection through its `LoanProject`. `--validate-only` performs source checks without creating a project. Semantic warnings block creation unless explicitly reviewed with `--allow-validation-warnings`. Active duplicate project names, duplicate entity IDs, invalid UUIDs, malformed pagination, and a target equal to the reference loan are rejected.

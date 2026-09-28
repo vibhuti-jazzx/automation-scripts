@@ -6,3 +6,11 @@ __pycache__/
 .pytest_cache/
 document-page-count-reports/
 *_split/
+
+# Run outputs: these carry real loan numbers, collection/project IDs and gateway
+# URLs. The repository is deliberately instance-neutral (see README) so they are
+# never committed.
+clone-*.json
+clone-result.json
+app-config-audit.json
+verify-report.json
