@@ -988,6 +988,21 @@ class MarkdownReport(unittest.TestCase):
         self.assertIn("| Token lifetime | 1h |", md)
         self.assertNotIn("Image digest", md)
 
+    def test_report_hides_internal_macer_default_config_path(self):
+        check = ds._bad("macer", "macer.config.complete", "macer_config is complete",
+                        "macer_config.default.jtbd_entity_id is missing", "Update the config")
+        report = {
+            "environment": {"label": "s", "gateway_url": "https://a", "run_at": "now",
+                             "groups_run": ["macer"], "token_expiry": "1h",
+                             "image_digest": None, "read_calls": 0, "write_calls_attempted": 0,
+                             "transport_errors": []},
+            "checks": [ds.asdict(check)],
+            "summary": ds.summarise([check]),
+        }
+        md = ds.render_markdown(report)
+        self.assertNotIn("macer_config.default", md)
+        self.assertIn("MACER default setting jtbd_entity_id", md)
+
     def test_token_lifetime(self):
         import base64, json as _json
         body = base64.urlsafe_b64encode(_json.dumps({"iat": 1000, "exp": 4600}).encode()).decode().rstrip("=")

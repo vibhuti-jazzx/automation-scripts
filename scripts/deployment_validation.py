@@ -3162,6 +3162,10 @@ def run_checks(args: argparse.Namespace, client: JazzXClient, probe: Probe, *,
 def _cell(value: Any) -> str:
     """A value made safe for one Markdown table cell."""
     text = "-" if value in (None, "") else str(value)
+    # Keep internal config paths out of the human-facing report while retaining
+    # the underlying validation details in the check data.
+    text = text.replace("macer_config.default.", "MACER default setting ")
+    text = text.replace("macer_config.default", "MACER default configuration")
     return text.replace("|", "\\|").replace("\n", " ").strip()
 
 
