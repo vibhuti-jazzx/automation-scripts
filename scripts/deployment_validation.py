@@ -15,8 +15,9 @@ Check groups, every one emitting the same CheckResult shape:
                is resolved against this instance. A process deployed without the
                tool it calls is the silent break that shows up hours later as a
                stuck instance.
-  collections  every UUID in the global config resolves, ontologies exist and
-               are populated, no entity points at a missing ontology.
+  collections  ontologies exist and are populated, collections are readable and
+               no entity points at a missing ontology. Run config_audit.py for
+               the separate global-config UUID audit.
   traces       MLflow is reachable, the experiment exists, and traces are both
                PRESENT and COMPLETE. Those are different faults.
   pipeline     the loan pipeline answers and every row resolves to a live
@@ -32,10 +33,6 @@ Check groups, every one emitting the same CheckResult shape:
                tools, the invocation ontology, and a complete macer_config whose
                ids resolve. The worker itself has no HTTP surface and is
                reported as such, not passed.
-  config_drift [only with --compare-gateway-url] APP_CONFIG compared with a
-               reference instance key by key. Ids differ per instance and are
-               ignored; a key that points at a different kind / name / detail,
-               or exists on one side only, fails.
 
 Nothing here writes. Every call is a GET, or a POST to an endpoint whose
 contract is search/compare only. The report states the write-call count, and it
@@ -59,7 +56,8 @@ is always zero.
         --compare-gateway-url https://<other-host> --compare-label prod
 
 Writes one Markdown report, <output-dir>/<label>-<time>.md: summary, failures,
-undecided checks, every APP_CONFIG id and what it resolves to, config drift, all checks.
+undecided checks, and all deployment checks. Use config_audit.py for a dedicated
+APP_CONFIG UUID report.
 
 Exit codes: 0 clean, 1 a check failed (after mode: a check REGRESSED),
 2 degraded -- checks could not run, 3 the script could not start.
@@ -197,15 +195,12 @@ PAGE_LIMIT = 100
 PASS, FAIL, UNKNOWN, SKIPPED, INFO = "pass", "fail", "unknown", "skipped", "info"
 
 GROUPS = ("platform", "deployment", "frontend", "process", "collections", "traces",
-          "pipeline", "assistant", "loan", "classify", "macer", "config_drift")
+          "pipeline", "assistant", "loan", "classify", "macer")
 #: Run only when asked for with --classify-macer, never by default.
 OPT_IN_GROUPS = ("classify", "macer")
-#: Run only with --compare-gateway-url (it needs a second instance); not selectable with --checks.
-COMPARE_GROUPS = ("config_drift",)
 #: Commented out in run_checks for now: the process / tool / agent validation.
 DISABLED_GROUPS = ("process",)
-DEFAULT_GROUPS = tuple(g for g in GROUPS
-                       if g not in OPT_IN_GROUPS + COMPARE_GROUPS + DISABLED_GROUPS)
+DEFAULT_GROUPS = tuple(g for g in GROUPS if g not in OPT_IN_GROUPS + DISABLED_GROUPS)
 
 
 @dataclass
@@ -727,8 +722,8 @@ def check_process_closure(probe: Probe, *, max_processes: int | None,
         started = time.monotonic()
         rows = probe.items(path)
         code = probe.list_status.get(path, 0)
-        print(f" {len(rows)} ({time.monotonic() - started:.1f}s"
-              f"{'' if code == 200 else f', HTTP {code or 'no response'}'})",
+        status = "" if code == 200 else f", HTTP {code or 'no response'}"
+        print(f" {len(rows)} ({time.monotonic() - started:.1f}s{status})",
               file=sys.stderr, flush=True)
         return rows
 
@@ -1021,300 +1016,11 @@ def _entity_type_count(ontology: dict[str, Any]) -> int | None:
                 return len(value)
     return None
 
-
-# ---------------------------------------------------------------------------
-# APP_CONFIG id audit (formerly scripts/audit_app_config_ids.py)
-#
-# APP_CONFIG holds ids -- findings_ontology_id, docs_ontology_id, collection ids --
-# as bare strings that nothing validates; a stale one fails far downstream as a
-# process that finds no data. These resolve every UUID in the config against the
-# instance (ontology, collection, entity, or nothing), and compare two instances
-# key by key. Each instance mints its own ids, so the comparison ignores ids and
-# asserts what they point at: same kind, name and detail.
-# ---------------------------------------------------------------------------
-AUDIT_PAGE_LIMIT = 500
-
-
-def find_uuids(value: Any, path: str = "") -> list[tuple[str, str]]:
-    """Every UUID-looking string in a nested structure, with its key path.
-
-    Walks the whole value rather than reading a fixed list of keys, so an id added
-    to the config later is audited without this code needing to change.
-    """
-    found: list[tuple[str, str]] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            found.extend(find_uuids(item, f"{path}.{key}" if path else str(key)))
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            found.extend(find_uuids(item, f"{path}[{index}]"))
-    elif isinstance(value, str) and UUID_RE.match(value.strip()):
-        found.append((path, value.strip()))
-    return found
-
-
-def fetch_all(client: JazzXClient, path: str, **params: Any) -> list[dict[str, Any]]:
-    """Page a list endpoint until it stops returning full pages."""
-    items: list[dict[str, Any]] = []
-    skip = 0
-    while True:
-        payload = client.request(
-            "GET", path, params={"skip": skip, "limit": AUDIT_PAGE_LIMIT, **params}
-        ).json()
-        page = extract_items(payload)
-        items.extend(page)
-        if len(page) < AUDIT_PAGE_LIMIT:
-            return items
-        skip += AUDIT_PAGE_LIMIT
-        if skip > 100_000:
-            return items
-
-
-def resource_exists(client: JazzXClient, path: str) -> dict[str, Any] | None:
-    """GET one resource; None when the instance says it is not there."""
-    try:
-        response = client.request("GET", path, expected=(200, 404))
-    except ApiError:
-        return None
-    if response.status_code == 404:
-        return None
-    try:
-        body = response.json()
-    except ValueError:
-        return None
-    return body if isinstance(body, dict) else None
-
-
-_AUDITS: dict[tuple[str, str], dict[str, Any]] = {}
-
-
-def audit_instance(client: JazzXClient, config_name: str) -> dict[str, Any]:
-    """resolve_config_ids, once per instance and config: the `collections` group and
-    the `config_drift` comparison both need the target's audit."""
-    key = (client.gateway_url, config_name)
-    if key not in _AUDITS:
-        _AUDITS[key] = resolve_config_ids(client, config_name)
-    return _AUDITS[key]
-
-
-def resolve_config_ids(client: JazzXClient, config_name: str) -> dict[str, Any]:
-    """Resolve every UUID in one instance's config. Returns the report dict."""
-    configs = extract_items(
-        client.request("GET", GLOBAL_CONFIG, params={"name": config_name}).json()
-    )
-    match = next(
-        (c for c in configs if str(c.get("name") or c.get("key") or "") == config_name), None
-    )
-    if match is None:
-        every = extract_items(client.request("GET", GLOBAL_CONFIG).json())
-        names = sorted({str(c.get("name") or c.get("key") or "?") for c in every})
-        raise ApiError(
-            f"No global config named {config_name!r} on {client.gateway_url}. "
-            f"Found: {', '.join(names) or '<none>'}"
-        )
-    config_id = str(match.get("id") or "")
-
-    raw_value = match.get("value")
-    if not raw_value and config_id:
-        detail = resource_exists(client, f"{GLOBAL_CONFIG.rstrip('/')}/{config_id}") or {}
-        raw_value = detail.get("value", detail.get("config", detail))
-    value = parse_json_value(raw_value) or (raw_value if isinstance(raw_value, dict) else {})
-
-    references = find_uuids(value)
-    print(f"  {client.gateway_url}: config {config_id}, {len(references)} UUID references",
-          file=sys.stderr)
-
-    ontologies = {str(o.get("id")): o for o in fetch_all(client, ONTOLOGIES) if o.get("id")}
-    rows: list[dict[str, Any]] = []
-    seen: dict[str, dict[str, Any]] = {}
-    for key_path, candidate in references:
-        if candidate not in seen:
-            kind, name, note = "UNRESOLVED", "", "not an ontology, collection or entity"
-            if candidate in ontologies:
-                kind, name, note = "ontology", str(ontologies[candidate].get("name") or ""), ""
-            else:
-                collection = resource_exists(client, f"{COLLECTIONS}/{candidate}")
-                if collection is not None:
-                    kind, name, note = "collection", str(collection.get("name") or ""), ""
-                else:
-                    entity = resource_exists(client, f"{ENTITIES}/{candidate}")
-                    if entity is not None:
-                        kind = "entity"
-                        name = str(entity.get("name") or "")
-                        note = str(entity.get("entity_type") or "")
-            seen[candidate] = {"id": candidate, "resolved_as": kind, "name": name, "detail": note}
-        rows.append({**seen[candidate], "config_key": key_path})
-
-    counts: dict[str, int] = {}
-    for row in rows:
-        counts[row["resolved_as"]] = counts.get(row["resolved_as"], 0) + 1
-    unresolved = [r for r in rows if r["resolved_as"] == "UNRESOLVED"]
-    return {
-        "gateway_url": client.gateway_url,
-        "config_name": config_name,
-        "config_id": config_id,
-        "reference_count": len(rows),
-        "counts_by_kind": counts,
-        "unresolved_count": len(unresolved),
-        "references": rows,
-    }
-
-
-COMPARED_FIELDS = ("resolved_as", "name", "detail")
-
-
-def compare_reports(a: dict[str, Any], b: dict[str, Any],
-                    label_a: str, label_b: str) -> dict[str, Any]:
-    """Compare two audits by config key, ignoring ids.
-
-    Each instance mints its own UUIDs, so a differing id is expected and says
-    nothing. What must agree is what the id POINTS AT: the same kind of object,
-    with the same name and detail. Divergence there means the two instances are
-    configured differently however identical the config file looks.
-    """
-    by_key_a = {r["config_key"]: r for r in a["references"]}
-    by_key_b = {r["config_key"]: r for r in b["references"]}
-    rows: list[dict[str, Any]] = []
-    for key in sorted(set(by_key_a) | set(by_key_b)):
-        ra, rb = by_key_a.get(key), by_key_b.get(key)
-        if ra is None or rb is None:
-            rows.append({
-                "config_key": key,
-                "verdict": f"MISSING_IN_{label_b.upper()}" if rb is None
-                           else f"MISSING_IN_{label_a.upper()}",
-                "differs_on": ["config_key"],
-                label_a: ra, label_b: rb,
-            })
-            continue
-        differs = [f for f in COMPARED_FIELDS if (ra.get(f) or "") != (rb.get(f) or "")]
-        rows.append({
-            "config_key": key,
-            "verdict": "MATCH" if not differs else "MISMATCH",
-            "differs_on": differs,
-            "same_id": ra["id"] == rb["id"],
-            label_a: ra, label_b: rb,
-        })
-    problems = [r for r in rows if r["verdict"] != "MATCH"]
-    return {
-        "label_a": label_a, "label_b": label_b,
-        "gateway_a": a["gateway_url"], "gateway_b": b["gateway_url"],
-        "config_name": a["config_name"],
-        "compared_fields": list(COMPARED_FIELDS),
-        "key_count": len(rows),
-        "match_count": len(rows) - len(problems),
-        "problem_count": len(problems),
-        "shared_id_count": sum(1 for r in rows if r.get("same_id")),
-        "rows": rows,
-    }
-
-
-DRIFT = "config_drift"
-
-
-def _describe(row: dict[str, Any] | None) -> str:
-    if not row:
-        return "absent"
-    return f"{row.get('resolved_as')}: {row.get('name') or row.get('detail') or '-'}"
-
-
-def drift_checks(cmp: dict[str, Any]) -> list[CheckResult]:
-    """One check per config key, plus a summary line."""
-    a, b = cmp["label_a"], cmp["label_b"]
-    out: list[CheckResult] = []
-    for row in cmp["rows"]:
-        key = row["config_key"]
-        cid = f"{DRIFT}.{re.sub(r"[^a-z0-9_]+", "_", key.lower()).strip("_") or "key"}"
-        title = f"Config key {key} matches {b}"
-        ra, rb = row.get(a), row.get(b)
-        if row["verdict"] == "MATCH":
-            out.append(_ok(DRIFT, cid, title, _describe(ra), config_key=key))
-            continue
-        if row["verdict"].startswith("MISSING_IN_"):
-            where = b if rb is None else a
-            detail = f"present only on {a if rb is None else b} ({_describe(ra or rb)}); missing on {where}"
-            fix = f"Add {key} to APP_CONFIG on {where}, or remove it from the other side."
-        else:
-            detail = (f"differs on {', '.join(row['differs_on'])}: "
-                      f"{a} = {_describe(ra)}  /  {b} = {_describe(rb)}")
-            fix = (f"Point {key} on {a} at the same kind of object, with the same name, as on {b} "
-                   "(the id itself may differ).")
-        out.append(_bad(DRIFT, cid, title, detail, fix, config_key=key,
-                               verdict=row["verdict"], differs_on=row["differs_on"],
-                               **{a: ra, b: rb}))
-    out.append(_info(DRIFT, f"{DRIFT}.summary", f"APP_CONFIG compared with {b}",
-                            f"{cmp['match_count']} match, {cmp['problem_count']} differ, "
-                            f"of {cmp['key_count']} keys",
-                            gateway_b=cmp["gateway_b"], shared_id_count=cmp["shared_id_count"]))
-    return out
-
-
-def reference_client(args: argparse.Namespace) -> JazzXClient:
-    return JazzXClient(
-        gateway_url=normalize_gateway_url(require_value(
-            args.compare_gateway_url, name="--compare-gateway-url")),
-        token=require_value(args.compare_token, name="--compare-token", env_name="JAZZX_TOKEN_B"),
-        timeout=args.timeout,
-    )
-
-
-def run_drift(client: JazzXClient, args: argparse.Namespace
-              ) -> tuple[list[CheckResult], dict[str, Any] | None]:
-    """Audit both instances and compare. Failures to reach either side are UNKNOWN, not FAIL."""
-    print(f"comparing {args.config_name} with {args.compare_label} ...", file=sys.stderr)
-    title = f"APP_CONFIG compared with {args.compare_label}"
-    try:
-        target = audit_instance(client, args.config_name)
-    except (ApiError, ValueError) as exc:
-        return [_unk(DRIFT, f"{DRIFT}.summary", title,
-                            f"{args.label}: {exc}",
-                            f"Confirm a global config named {args.config_name!r} exists.")], None
-    try:
-        other = reference_client(args)
-        reference = audit_instance(other, args.config_name)
-    except (ApiError, ValueError, SystemExit) as exc:
-        return [_unk(DRIFT, f"{DRIFT}.summary", title,
-                            f"{args.compare_label}: {exc}",
-                            "Check --compare-gateway-url (the -gw host) and that the "
-                            "reference token is valid.")], None
-    cmp = compare_reports(target, reference, args.label, args.compare_label)
-    return drift_checks(cmp), cmp
-
-
 def check_collections(
-    probe: Probe, client: JazzXClient, *, config_name: str, collection_id: str | None
+    probe: Probe, client: JazzXClient, *, collection_id: str | None
 ) -> list[CheckResult]:
     g = "collections"
     out: list[CheckResult] = []
-
-    # Every UUID in the global config must resolve to something on this instance.
-    try:
-        report = audit_instance(client, config_name)
-    except (ApiError, ValueError) as exc:
-        out.append(_unk(g, "collections.global_config", "Every global-config id resolves",
-                        str(exc), f"Confirm a global config named {config_name!r} exists."))
-    else:
-        for row in report["references"]:
-            key = row["config_key"]
-            slug = re.sub(r"[^a-z0-9_]+", "_", key.lower()).strip("_") or "key"
-            cid = f"collections.config.{slug}"
-            title = f"Config id {key} resolves"
-            if row["resolved_as"] == "UNRESOLVED":
-                out.append(_bad(g, cid, title,
-                                f"{key} = {row['id']} matches no ontology, collection or "
-                                "entity on this instance",
-                                "The id is stale or was copied from another instance; "
-                                "repoint it at a live object.",
-                                config_key=key, id=row["id"]))
-            else:
-                out.append(_ok(g, cid, title,
-                               f"{row['resolved_as']}: {row['name'] or row['detail'] or '-'}",
-                               config_key=key, resolved_as=row["resolved_as"]))
-        out.append(_info(g, "collections.global_config", "Global-config id audit",
-                         f"{report['reference_count']} ids, "
-                         f"{report['unresolved_count']} unresolved",
-                         **{k: report[k] for k in
-                            ("config_id", "reference_count", "unresolved_count",
-                             "counts_by_kind")}))
 
     # Ontologies exist and carry entity types.
     ontologies = probe.items(ONTOLOGIES)
@@ -3264,7 +2970,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--label", default="instance", help="Names this instance in reports")
     parser.add_argument("--checks", default=",".join(DEFAULT_GROUPS),
                         help=f"Comma-separated subset of: "
-                             f"{', '.join(g for g in GROUPS if g not in COMPARE_GROUPS)} "
+                             f"{', '.join(GROUPS)} "
                              f"({', '.join(OPT_IN_GROUPS)} also need --classify-macer)")
     parser.add_argument("--classify-macer", action="store_true",
                         help="Also check split & classify and MACER readiness (still "
@@ -3304,29 +3010,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="With --tool-report, list the deployed tools as well as the "
                              "missing ones")
     parser.add_argument("--verbose", action="store_true", help="List passing checks too")
-    parser.add_argument("--compare-gateway-url", default=os.getenv("JAZZX_GATEWAY_URL_B", ""),
-                        help="Reference instance to compare APP_CONFIG with (adds config_drift)")
-    parser.add_argument("--compare-token", default=os.getenv("JAZZX_TOKEN_B"),
-                        help="Token for the reference instance (default $JAZZX_TOKEN_B)")
-    parser.add_argument("--compare-label", default="reference",
-                        help="Names the reference instance in the report (default 'reference')")
     parser.add_argument("--no-progress", action="store_true",
                         help="Do not print per-process progress")
     args = parser.parse_args(argv)
-    if args.compare_gateway_url and not args.compare_token:
-        parser.error("--compare-gateway-url needs --compare-token or $JAZZX_TOKEN_B")
-    if args.compare_gateway_url and args.compare_label == args.label:
-        parser.error("--compare-label must differ from --label")
 
     set_bss_prefix(args.bss_prefix)
     args.groups = [g.strip() for g in args.checks.split(",") if g.strip()]
     disabled = [g for g in args.groups if g in DISABLED_GROUPS]
     if disabled:
         parser.error(f"check group(s) {', '.join(disabled)} are switched off in this script")
-    unknown = [g for g in args.groups if g not in GROUPS or g in COMPARE_GROUPS]
+    unknown = [g for g in args.groups if g not in GROUPS]
     if unknown:
-        allowed = [g for g in GROUPS if g not in COMPARE_GROUPS]
-        parser.error(f"unknown check group(s): {', '.join(unknown)}; pick from {', '.join(allowed)}")
+        parser.error(f"unknown check group(s): {', '.join(unknown)}; pick from {', '.join(GROUPS)}")
     opt_in = [g for g in args.groups if g in OPT_IN_GROUPS]
     if opt_in and not args.classify_macer:
         parser.error(f"{', '.join(opt_in)} run only with --classify-macer")
@@ -3425,7 +3120,7 @@ def run_checks(args: argparse.Namespace, client: JazzXClient, probe: Probe, *,
     if "collections" in args.groups:
         print("checking collections and ontologies ...", file=sys.stderr)
         results.extend(check_collections(
-            probe, client, config_name=args.config_name, collection_id=args.collection_id))
+            probe, client, collection_id=args.collection_id))
 
     if "traces" in args.groups:
         print("checking ML traces ...", file=sys.stderr)
@@ -3511,38 +3206,6 @@ def render_markdown(report: dict[str, Any]) -> str:
             add(f"| {c['group']} | {_cell(c['title'])} | {_cell(c['detail'])} | {_cell(c.get('remediation'))} |")
         add("")
 
-    ids = report.get("app_config_ids")
-    if ids:
-        refs = ids["references"]
-        add(f"## APP_CONFIG ids ({ids['config_name']})")
-        add("")
-        add(f"{ids['reference_count']} ids, {ids['unresolved_count']} unresolved. "
-            "Each id must point at an ontology, collection or entity on this instance.")
-        add("")
-        add("| Config key | Id | Resolves to | Name | Valid |")
-        add("|---|---|---|---|---|")
-        for r in refs:
-            ok = "no" if r["resolved_as"] == "UNRESOLVED" else "yes"
-            add(f"| {_cell(r['config_key'])} | `{r['id']}` | {_cell(r['resolved_as'])} | "
-                f"{_cell(r['name'] or r['detail'])} | {ok} |")
-        add("")
-
-    drift = report.get("config_drift")
-    if drift:
-        add(f"## APP_CONFIG compared with {drift['label_b']}")
-        add("")
-        add(f"{drift['match_count']} match, {drift['problem_count']} differ, of "
-            f"{drift['key_count']} keys ({drift['gateway_b']}). Ids differ per instance and are ignored.")
-        add("")
-        if drift["differences"]:
-            a, b = drift["label_a"], drift["label_b"]
-            add(f"| Config key | Verdict | {a} | {b} |")
-            add("|---|---|---|---|")
-            for r in drift["differences"]:
-                side = lambda x: _cell(f"{x.get('resolved_as')}: {x.get('name') or x.get('detail') or '-'}") if x else "absent"
-                add(f"| {_cell(r['config_key'])} | {r['verdict']} | {side(r.get(a))} | {side(r.get(b))} |")
-            add("")
-
     comparison = report.get("comparison")
     if comparison:
         add(f"## Changes since the baseline ({_cell(comparison.get('baseline_run'))})")
@@ -3580,9 +3243,8 @@ def render_markdown(report: dict[str, Any]) -> str:
 def finish(args: argparse.Namespace, client: JazzXClient, probe: Probe,
            results: list[CheckResult], image_digest: str | None,
            baseline: dict[str, Any] | None, token_summary: str, token_exp_iso: str, *,
-           groups_run: list[str] | None = None, extra: dict[str, Any] | None = None) -> int:
-    """Summarise, compare with the baseline, print, write the report, return the exit code.
-    `extra` is merged into the report (the config_drift section)."""
+           groups_run: list[str] | None = None) -> int:
+    """Summarise, compare with the baseline, print, write the report, return the exit code."""
     env = {
         "label": args.label,
         "gateway_url": client.gateway_url,
@@ -3601,14 +3263,6 @@ def finish(args: argparse.Namespace, client: JazzXClient, probe: Probe,
         "environment": env,
         "checks": [redact(asdict(r)) for r in results],
     }
-    if extra:
-        report.update(redact(extra))
-    ids = _AUDITS.get((client.gateway_url, args.config_name))
-    if ids:
-        report["app_config_ids"] = {k: ids[k] for k in
-                                    ("config_name", "config_id", "reference_count",
-                                     "unresolved_count", "references")}
-
     comparison = None
     if baseline is not None:
         digest_check = check_digest_changed(baseline, report)
@@ -3646,18 +3300,8 @@ def main(argv: list[str] | None = None) -> int:
     progress = None if args.no_progress else process_progress()
     results, image_digest = run_checks(args, client, probe, progress=progress)
 
-    groups_run = list(args.groups)
-    extra: dict[str, Any] = {}
-    if args.compare_gateway_url:
-        drift, cmp = run_drift(client, args)
-        results.extend(drift)
-        groups_run.append(DRIFT)
-        if cmp is not None:
-            extra["config_drift"] = {k: v for k, v in cmp.items() if k != "rows"} | {
-                "differences": [r for r in cmp["rows"] if r["verdict"] != "MATCH"]}
-
     return finish(args, client, probe, results, image_digest, baseline,
-                  token_summary, token_exp_iso, groups_run=groups_run, extra=extra)
+                  token_summary, token_exp_iso)
 
 
 if __name__ == "__main__":

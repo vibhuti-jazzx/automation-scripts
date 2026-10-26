@@ -331,7 +331,7 @@ Six groups, each emitting the same `CheckResult` record:
 | `frontend` | the federated micro-frontends: `/env.js` is served, and every `VITE_MICROFRONTEND_URL_*` it declares returns a real JavaScript module. A missing remote breaks whole sections of the UI while every backend check stays green. |
 | `deployment` | what is running at this URL: `api-health`, deployment history, and the Azure container app or function app behind the hostname. In after mode an **unchanged image digest fails** — the deploy did not land. |
 | `process` | every tool, sub-process and agent a process references actually resolves on this instance; every agent has a `kernel_agent_id` and can reach the tools it lists. |
-| `collections` | every UUID in the global config resolves, ontologies are loaded, no entity points at a missing ontology. |
+| `collections` | ontologies are loaded, collections are readable, and no entity points at a missing ontology. Use `config_audit.py` for global-config UUIDs. |
 | `traces` | MLflow is reachable, the experiment exists, traces are both present *and* complete. |
 | `pipeline` | the loan pipeline answers and every row resolves to a live project. |
 | `assistant` | the JazzX Assistant and the **Luna agent**: an agent named `luna_agent` exists and is bound to the kernel, its tools and its model are deployed, assistant-to-agent bindings resolve, MCP is healthy, and message traces show Luna actually answering. |
@@ -381,10 +381,9 @@ python3 scripts/deployment_validation.py \
   --output-dir sanity/
 ```
 
-Each run writes one Markdown report, `<label>-<timestamp>.md`: the summary, every failure and
-undecided check with what to do, a table of every APP_CONFIG id (key, id, what it resolves
-to, valid or not), the config drift table when `--compare-gateway-url` is given, and every
-check. No JSON is written. `--baseline` still accepts a JSON report written by an older run.
+Each run writes one Markdown report, `<label>-<timestamp>.md`: the summary, every failure,
+undecided check, and every deployment check. `--baseline` still accepts a JSON report written
+by an older run. This script does not audit APP_CONFIG UUIDs; use `config_audit.py` for that.
 
 Exit codes: `0` clean — in after mode, no regressions; `1` a check failed, or in after
 mode regressed; `2` degraded, checks could not run; `3` the script could not start.
@@ -465,28 +464,35 @@ as the problems.
 For a fast pre-deploy smoke test, `--checks platform,assistant` covers the token, every
 service behind the gateway, and whether Luna is answering, in a handful of calls.
 
-Group `collections` resolves every UUID in APP_CONFIG against the instance (ontology,
-collection, entity, or nothing); this replaced `audit_app_config_ids.py`.
+Group `collections` checks ontology and collection readiness. It does not resolve IDs from
+APP_CONFIG, so a deployment health run and a configuration audit can be run independently.
 Group `process` parses each BPMN definition for the shapes the real processes use —
 `setVariable("toolName", "...")`, `callActivity/@calledElement`, and
 `flowable:delegateExpression` — so a tool added to a process is picked up without editing
 this script. A `calledElement` resolved from a process variable is reported as dynamic and
 not judged, since its target cannot be known statically.
 
-#### Comparing APP_CONFIG with another instance (`config_drift`)
+While walking processes it prints `process 37/177 KEY`; `--no-progress` turns that off.
 
-With `--compare-gateway-url`, APP_CONFIG is also compared with a reference instance key by
-key. Ids are expected to differ and are ignored; a key that resolves to a different kind,
-name or detail, or exists on one side only, fails. The report gets a `config_drift` section.
+### `scripts/config_audit.py`
+
+The configuration audit is intentionally separate from deployment validation. It reads a
+global configuration such as `APP_CONFIG`, recursively finds every UUID, and checks whether
+each UUID resolves on the current instance as an ontology, collection, or entity. It writes
+both JSON and Markdown reports and exits `1` when any UUID is unresolved.
 
 ```bash
-export JAZZX_TOKEN_B="<token for the reference instance>"
-python3 scripts/deployment_validation.py \
-  --gateway-url https://<host>-gw.<domain> --label staging --output-dir sanity/ \
-  --compare-gateway-url https://<reference>-gw.<domain> --compare-label prod
+export JAZZX_TOKEN="<current JWT>"
+python3 scripts/config_audit.py \
+  --gateway-url https://poc3-gw.jazzx.co \
+  --label poc3 \
+  --config-name APP_CONFIG \
+  --output-dir config-audit/
 ```
 
-While walking processes it prints `process 37/177 KEY`; `--no-progress` turns that off.
+To compare the configuration shape between two instances, add `--gateway-url-b`,
+`--token-b` (or `JAZZX_TOKEN_B`), and `--label-b`. UUIDs are expected to differ; the
+comparison checks the resolved kind, name, and detail behind each config key.
 
 ### `scripts/customer_access_report.py`
 

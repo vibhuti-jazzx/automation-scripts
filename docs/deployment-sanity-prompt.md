@@ -1,4 +1,4 @@
-# Build prompt — `scripts/deployment_sanity.py`
+# Build prompt — `scripts/deployment_validation.py`
 
 ## Goal
 
@@ -30,9 +30,9 @@ pre-existing, not as a regression.
 - `scripts/jazzx_api.py` — `JazzXClient` (bearer auth, retry/backoff, `iter_offset_pages`),
   `extract_items`, `parse_json_value`, `ApiError`, `require_value`, `normalize_gateway_url`,
   `validate_uuid`. Use it for every HTTP call.
-- `scripts/audit_app_config_ids.py` — **this is the model.** Same docstring style, same
-  read-only posture, same `--output-dir` JSON report, same two-instance comparison structure.
-  The new script is its sibling. Match its conventions rather than introducing new ones.
+- `scripts/config_audit.py` — the separate APP_CONFIG UUID auditor. Keep configuration
+  auditing out of the deployment-health script; both tools should remain independently
+  runnable and read-only.
 - `requirements.txt` — `requests`, `pydantic`, `pypdf`. Add a dependency only if unavoidable.
 
 Python 3.10+, stdlib + the above. No new framework.
@@ -40,7 +40,7 @@ Python 3.10+, stdlib + the above. No new framework.
 ## Inputs
 
 ```bash
-python3 scripts/deployment_sanity.py \
+python3 scripts/deployment_validation.py \
     --gateway-url https://poc-gw.jazzx.co \
     --label poc \
     --output-dir sanity/ \
@@ -111,8 +111,7 @@ This is the primary group. The question is not "does the process exist" but
 3. Extract the process's dependency set — every tool and agent it references. The reference
    may appear in the BPMN/definition body, in `resourcedata`
    (`GET /api/v1/bss_process/resourcedata/{process_definition_id}`), or in service-task
-   properties. Walk the structure generically the way `find_uuids()` in
-   `audit_app_config_ids.py` walks config, so a new reference shape is caught without a
+   properties. Walk the structure generically so a new reference shape is caught without a
    code change. Do not hardcode a list of tool names.
 4. Resolve each dependency against the instance:
    - tools: `GET /api/v1/bss_tool/` , `GET /api/v1/bss_tool/{tool_id}`,
@@ -132,9 +131,9 @@ This is the primary group. The question is not "does the process exist" but
 
 ### C. Collections and ontologies
 
-1. `GET /knowledge_hub/api/v1/global-config/` — every UUID in it must resolve.
-   `audit_app_config_ids.py` already does this; **call into it rather than duplicating it**,
-   and fold its findings in as `CheckResult`s.
+1. Run `scripts/config_audit.py` separately against
+   `GET /knowledge_hub/api/v1/global-config/`. Every UUID in the configuration must resolve.
+   Do not duplicate the UUID-resolution logic in the deployment-health script.
 2. `GET /knowledge_hub/api/v1/reasoning/ontologies` — the ontologies named in global config
    (findings ontology, docs ontology, and any others present) must exist, be non-empty, and
    carry the entity types the processes and agents reference.
@@ -233,8 +232,8 @@ in one final line, and when it is not clean, name the first blocking item.
 
 ## Deliverables
 
-1. `scripts/deployment_sanity.py`
-2. A `## scripts/deployment_sanity.py` section appended to `README.md`, matching the style of
+1. `scripts/deployment_validation.py`
+2. A `## scripts/deployment_validation.py` section appended to `README.md`, matching the style of
    the existing entries — what it does, the two-run workflow, worked before/after example,
    exit codes.
 3. `tests/` coverage for the pure logic: `CheckResult` diffing, dependency extraction from a

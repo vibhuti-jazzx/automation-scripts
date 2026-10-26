@@ -11,9 +11,6 @@ import contextlib
 import io
 import sys
 import unittest
-import os
-from types import SimpleNamespace
-from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -925,105 +922,13 @@ class TestClassifyMacerOptIn(unittest.TestCase):
         self.assertEqual(args.groups, ["classify", "macer"])
 
 
-# --- config drift, progress, audit cache ---
-
-def ref(kind, name, detail="", rid="00000000-0000-0000-0000-000000000001"):
-    return {"id": rid, "resolved_as": kind, "name": name, "detail": detail}
-
-
-def audit_report(gateway, rows):
-    return {"gateway_url": gateway, "config_name": "APP_CONFIG",
-            "references": [{**r, "config_key": k} for k, r in rows.items()]}
-
-
-class DriftChecks(unittest.TestCase):
-    def setUp(self):
-        a = audit_report("https://a", {
-            "findings_ontology_id": ref("ontology", "finding_ontology"),
-            "docs_ontology_id": ref("ontology", "docs_v1"),
-            "only_here": ref("collection", "loans"),
-        })
-        b = audit_report("https://b", {
-            "findings_ontology_id": ref("ontology", "finding_ontology", rid="other-id"),
-            "docs_ontology_id": ref("ontology", "docs_v2"),
-        })
-        self.cmp = ds.compare_reports(a, b, "staging", "prod")
-        self.checks = {c.id: c for c in ds.drift_checks(self.cmp)}
-
-    def test_matching_key_passes_even_with_different_ids(self):
-        self.assertEqual(self.checks["config_drift.findings_ontology_id"].status, ds.PASS)
-
-    def test_mismatch_fails_and_names_both_sides(self):
-        c = self.checks["config_drift.docs_ontology_id"]
-        self.assertEqual(c.status, ds.FAIL)
-        self.assertIn("docs_v1", c.detail)
-        self.assertIn("docs_v2", c.detail)
-        self.assertEqual(c.evidence["differs_on"], ["name"])
-
-    def test_key_on_one_side_only_fails(self):
-        c = self.checks["config_drift.only_here"]
-        self.assertEqual(c.status, ds.FAIL)
-        self.assertIn("missing on prod", c.detail)
-
-    def test_summary_counts(self):
-        s = self.checks["config_drift.summary"]
-        self.assertEqual(s.status, ds.INFO)
-        self.assertIn("1 match, 2 differ, of 3 keys", s.detail)
-
-    def test_drift_failures_set_exit_code_1(self):
-        summary = ds.summarise(list(self.checks.values()))
-        self.assertEqual(ds.exit_code(summary, None), 1)
-
-
-class RunDrift(unittest.TestCase):
-    def test_unreachable_reference_is_unknown_not_fail(self):
-        args = SimpleNamespace(compare_gateway_url="https://b", compare_token="t",
-                               compare_label="prod", config_name="APP_CONFIG",
-                               label="staging", timeout=5)
-        target = audit_report("https://a", {"k": ref("ontology", "x")})
-        calls = []
-
-        def fake_audit(client, name):
-            calls.append(client)
-            if client == "target":
-                return target
-            raise ds.ApiError("HTTP 401")
-
-        saved = (ds.audit_instance, ds.reference_client)
-        ds.audit_instance = fake_audit
-        ds.reference_client = lambda *a, **k: "reference"
-        try:
-            checks, cmp = ds.run_drift("target", args)
-        finally:
-            ds.audit_instance, ds.reference_client = saved
-        self.assertIsNone(cmp)
-        self.assertEqual([c.status for c in checks], [ds.UNKNOWN])
-        self.assertIn("prod", checks[0].detail)
-
-
-class Audits(unittest.TestCase):
-    def test_each_instance_is_audited_once(self):
-        calls = []
-        saved = ds.resolve_config_ids
-        ds.resolve_config_ids = lambda client, name: calls.append(client.gateway_url) or {}
-        ds._AUDITS.clear()
-        try:
-            a, b = SimpleNamespace(gateway_url="https://a"), SimpleNamespace(gateway_url="https://b")
-            for client in (a, a, b):
-                ds.audit_instance(client, "APP_CONFIG")
-        finally:
-            ds.resolve_config_ids = saved
-            ds._AUDITS.clear()
-        self.assertEqual(calls, ["https://a", "https://b"])
-
+# --- argument parsing, progress, and report rendering ---
 
 class Args(unittest.TestCase):
-    def test_compare_options_parse(self):
+    def test_basic_options_parse(self):
         args = ds.parse_args([
-            "--gateway-url", "https://x-gw.example", "--token", "t", "--label", "staging",
-            "--compare-gateway-url", "https://y-gw.example", "--compare-token", "u",
-            "--compare-label", "prod", "--checks", "platform,loan", "--max-processes", "5"])
-        self.assertEqual(args.compare_label, "prod")
+            "--gateway-url", "https://x-gw.example", "--token", "t",
+            "--checks", "platform,loan", "--max-processes", "5"])
         self.assertEqual(args.groups, ["platform", "loan"])
         self.assertEqual(args.max_processes, 5)
 
@@ -1031,17 +936,6 @@ class Args(unittest.TestCase):
         self.assertNotIn("process", ds.DEFAULT_GROUPS)
         with self.assertRaises(SystemExit):
             ds.parse_args(["--checks", "process"])
-
-    def test_config_drift_is_not_selectable_with_checks(self):
-        with self.assertRaises(SystemExit):
-            ds.parse_args(["--checks", "config_drift"])
-        self.assertNotIn("config_drift", ds.DEFAULT_GROUPS)
-
-    def test_compare_needs_a_token(self):
-        env = {k: v for k, v in os.environ.items() if k != "JAZZX_TOKEN_B"}
-        with mock.patch.dict(os.environ, env, clear=True), self.assertRaises(SystemExit):
-            ds.parse_args(["--compare-gateway-url", "https://y-gw.example"])
-
 
 class Progress(unittest.TestCase):
     def test_non_tty_prints_first_every_tenth_and_last(self):
@@ -1066,7 +960,7 @@ class Progress(unittest.TestCase):
 
 
 class MarkdownReport(unittest.TestCase):
-    def test_report_lists_failures_and_every_app_config_id(self):
+    def test_report_lists_failures_without_configuration_audit(self):
         checks = [ds._bad("platform", "platform.x", "Service x answers", "HTTP 404", "Deploy x"),
                   ds._ok("loan", "loan.y", "Loan y | ok")]
         report = {
@@ -1076,17 +970,12 @@ class MarkdownReport(unittest.TestCase):
                             "transport_errors": []},
             "checks": [ds.asdict(c) for c in checks],
             "summary": ds.summarise(checks),
-            "app_config_ids": {"config_name": "APP_CONFIG", "config_id": "c", "reference_count": 2,
-                               "unresolved_count": 1, "references": [
-                                   {**ref("ontology", "docs_v1"), "config_key": "docs_id"},
-                                   {**ref("UNRESOLVED", "", rid="dead"), "config_key": "old_id"}]},
         }
         md = ds.render_markdown(report)
         self.assertIn("## Failures (1)", md)
         self.assertIn("| platform | Service x answers | HTTP 404 | Deploy x |", md)
-        self.assertIn("| docs_id | `00000000-0000-0000-0000-000000000001` | ontology | docs_v1 | yes |", md)
-        self.assertIn("| old_id | `dead` | UNRESOLVED | - | no |", md)
         self.assertIn("Loan y \\| ok", md)
+        self.assertNotIn("APP_CONFIG", md)
         self.assertNotIn("## APP_CONFIG compared", md)
 
     def test_header_shows_token_lifetime_and_no_image_digest(self):
