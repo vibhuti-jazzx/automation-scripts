@@ -313,6 +313,206 @@ Use `--json-output` to print machine-readable results. Exit code `0` means no va
 
 Internal Pydantic payload builders used by `add_loan_mock_data.py`. They build and validate `LoanProject`, `LoanCore`, borrower, asset, income, liability, subject property, employment, credit report, loan application, and loan-details entities. This directory is a library and is not invoked directly.
 
+### `scripts/deployment_validation.py`
+
+A read-only checklist you run **before** a deployment and again **after**. The second
+run diffs itself against the first and reports what the deployment broke.
+
+That before/after shape is the point. A JazzX instance is never completely clean, so a
+flat list of failures is unreadable — what matters is which checks *changed*. A check
+that was already failing is reported as pre-existing and kept out of the headline, and
+in after mode only a genuine regression sets a non-zero exit code.
+
+Six groups, each emitting the same `CheckResult` record:
+
+| group | what it proves |
+| --- | --- |
+| `platform` | the things that explain most other failures: the token has not expired and who it belongs to, the local clock agrees with the server, and each service the gateway fronts answers. Runs first for that reason. |
+| `frontend` | the federated micro-frontends: `/env.js` is served, and every `VITE_MICROFRONTEND_URL_*` it declares returns a real JavaScript module. A missing remote breaks whole sections of the UI while every backend check stays green. |
+| `deployment` | what is running at this URL: `api-health`, deployment history, and the Azure container app or function app behind the hostname. In after mode an **unchanged image digest fails** — the deploy did not land. |
+| `process` | every tool, sub-process and agent a process references actually resolves on this instance; every agent has a `kernel_agent_id` and can reach the tools it lists. |
+| `collections` | every UUID in the global config resolves, ontologies are loaded, no entity points at a missing ontology. |
+| `traces` | MLflow is reachable, the experiment exists, traces are both present *and* complete. |
+| `pipeline` | the loan pipeline answers and every row resolves to a live project. |
+| `assistant` | the JazzX Assistant and the **Luna agent**: an agent named `luna_agent` exists and is bound to the kernel, its tools and its model are deployed, assistant-to-agent bindings resolve, MCP is healthy, and message traces show Luna actually answering. |
+| `loan` | loan creation would succeed — proven without creating a loan. |
+
+Nothing here writes. Every call is a `GET`, or a `POST` to a search-only MLflow endpoint
+(`/experiments/search`, `/runs/search` — MLflow has no GET form for those). Azure is read
+through `az containerapp|functionapp list|show` only. The guarantee is enforced rather
+than asserted: a non-`GET` raises `AssertionError` before the request is built, and the
+run header plus every report carry the call counts:
+
+```
+token:  valid 2.5h, until 2026-10-01T10:54:13+00:00
+calls:  9 read, 0 write  (this tool never writes)
+```
+
+The token line is printed on every run, not behind `--verbose` — an expired token makes
+every other line meaningless. A token that has already expired stops the run with exit
+`3` before a single check executes, rather than producing a report of false failures.
+
+Pointing it at the **web host** instead of the gateway also stops the run with exit `3`.
+A static web host answers every path — so a run against it invents successes rather than
+failing — and it is detected by the shape of the response to a nonsense path: HTML or an
+Azure Storage XML error rather than the gateway's JSON. The error names the `-gw` host to
+use instead.
+
+Before the deployment:
+
+Point `--gateway-url` at the **gateway** host, not the UI. The UI is a single-page app
+that answers every path with `index.html` and HTTP 200, so a run against it reports
+nonsense rather than failing. The gateway is the host that returns
+`{"status": false, "message": "Endpoint not found."}` on an unknown path — for the POC
+instance the UI is `poc.jazzx.co` and the gateway is `poc-gw.jazzx.co`.
+
+Builder Studio is reached through the gateway at `/builder_studio/api/v1`, which is the
+default. Its own `openapi.json` says `/api/v1`, because that is its internal mount; using
+that value 404s every Builder Studio call. Override with `--bss-prefix` if a gateway
+fronts it elsewhere.
+
+```bash
+export JAZZX_TOKEN="<current JWT>"       # jazz login <ui-url> writes one to .jwt_token.json
+
+python3 scripts/deployment_validation.py \
+  --gateway-url https://poc-gw.jazzx.co \
+  --label poc \
+  --collection-id 039b3dfb-486c-446d-b2e7-0936c0c3afd1 \
+  --output-dir sanity/
+```
+
+Each run writes one Markdown report, `<label>-<timestamp>.md`: the summary, every failure and
+undecided check with what to do, a table of every APP_CONFIG id (key, id, what it resolves
+to, valid or not), the config drift table when `--compare-gateway-url` is given, and every
+check. No JSON is written. `--baseline` still accepts a JSON report written by an older run.
+
+Exit codes: `0` clean — in after mode, no regressions; `1` a check failed, or in after
+mode regressed; `2` degraded, checks could not run; `3` the script could not start.
+
+`unknown` is deliberately not `fail`. MLflow being unreachable is not the same finding as
+MLflow having no traces, and collapsing them makes the report cry wolf. Only a check that
+ran and found a real problem fails.
+
+**The Luna checks are the reason the `assistant` group exists separately.** Luna is an
+ordinary kernel agent by name — `assistant/app/conversation/api.py` pins
+`LUNA_AGENT_NAME = "luna_agent"` and the fulfilment UI pins the same string — but it
+takes a different code path from every other agent: `create_new_japes_conversation`,
+which answers over the JAPES queue instead of inline. So Luna can have a valid record,
+a live model and every tool deployed, and still never reply to anybody, because the
+JAPES response-queue consumer is not running. Nothing about the agent shows that. What
+shows it is a message trace left in `queued` — `MessageTraceStatus` has only `queued`
+and `completed`, so anything still queued after `--stuck-trace-minutes` (default 15) is
+hung. That check is the group's real payload.
+
+The same group also catches message traces with no `trace_id` or `span_id`: those
+conversations ran but were never recorded in MLflow, which is the "the traces are
+missing" report that the `traces` group alone cannot explain — MLflow is reachable and
+the experiment is fine, the conversations just never reached it.
+
+`--user-id` is optional. When it is not given, the user id is read from the token's
+`sub` claim, since that is where it already is.
+
+**Why `frontend` is a separate group.** The shell app loads each micro-frontend with a
+dynamic `import()` of a `remoteEntry.js` named in `/env.js`. When a remote has not been
+uploaded, every service is healthy, every API answers, and the page still dies — the
+import rejects with `Failed to fetch dynamically imported module` and the user gets a
+generic error card. No backend check sees it. The group catches two cases, and the second
+is the quieter one:
+
+- **404** — the remote was never uploaded.
+- **200 with `text/html`** — a path fallback served `index.html` in place of the module.
+  The browser refuses to execute it, but the status code says healthy, so anything that
+  checks only the code calls this fine.
+
+The UI is a different host from the gateway, related by a `-gw` suffix on the first label
+(`staging-gw.plazahomemortgage.jazzx.co` serves `staging.plazahomemortgage.jazzx.co`).
+That is derived automatically; pass `--ui-url` when a deployment does not follow it.
+Requests to the UI host deliberately carry no `Authorization` header — it is not behind
+the gateway's auth and has no business seeing the token.
+
+### Tool presence report
+
+`--tool-report` adds a deduplicated table of every tool any process or agent reaches for,
+ticked when it is deployed on the instance:
+
+```
+TOOL PRESENCE  —  every tool referenced by a process or agent on this instance
+
+    tool                     used by                           status
+  ✗ ghost_tool_a             2 processes                       MISSING
+       referenced by: createLoan, syncBorrowers
+  ✗ ghost_tool_b             1 process, 1 agent                MISSING
+       referenced by: syncBorrowers, income_agent
+  ✓ entity_create            2 processes, 1 agent              deployed
+
+  3/5 referenced tools deployed, 2 missing.
+  1 deployed tool(s) nothing references: never_used_tool
+```
+
+It deduplicates deliberately: one missing tool referenced by nine processes is one thing
+to fix, not nine findings to read. A tool that resolves for one caller and not another
+counts as missing — the optimistic reading would hide a real break. `--tool-report-all`
+lists the deployed tools too; by default only the missing ones are shown, with the last
+line giving the totals. The same structure is written to the JSON report as `tool_report`.
+
+Useful flags: `--checks` selects groups (`process,pipeline`), `--skip-azure` avoids
+shelling out to the `az` CLI, `--max-processes` bounds a slow run, `--trace-window` sets
+how many hours of history count as recent (default 24), `--ui-url` names the web host when it cannot be derived, `--luna-agent-name` overrides the
+agent name the Assistant expects, `--stuck-trace-minutes` sets how long a queued message
+trace may sit before it counts as hung, and `--verbose` lists the passing checks as well
+as the problems.
+
+For a fast pre-deploy smoke test, `--checks platform,assistant` covers the token, every
+service behind the gateway, and whether Luna is answering, in a handful of calls.
+
+Group `collections` resolves every UUID in APP_CONFIG against the instance (ontology,
+collection, entity, or nothing); this replaced `audit_app_config_ids.py`.
+Group `process` parses each BPMN definition for the shapes the real processes use —
+`setVariable("toolName", "...")`, `callActivity/@calledElement`, and
+`flowable:delegateExpression` — so a tool added to a process is picked up without editing
+this script. A `calledElement` resolved from a process variable is reported as dynamic and
+not judged, since its target cannot be known statically.
+
+#### Comparing APP_CONFIG with another instance (`config_drift`)
+
+With `--compare-gateway-url`, APP_CONFIG is also compared with a reference instance key by
+key. Ids are expected to differ and are ignored; a key that resolves to a different kind,
+name or detail, or exists on one side only, fails. The report gets a `config_drift` section.
+
+```bash
+export JAZZX_TOKEN_B="<token for the reference instance>"
+python3 scripts/deployment_validation.py \
+  --gateway-url https://<host>-gw.<domain> --label staging --output-dir sanity/ \
+  --compare-gateway-url https://<reference>-gw.<domain> --compare-label prod
+```
+
+While walking processes it prints `process 37/177 KEY`; `--no-progress` turns that off.
+
+### `scripts/customer_access_report.py`
+
+Lists every login by a customer user on an instance: who, when, for how long, and from
+which IP. Every non-JazzX user counts as a customer user; JazzX domains are excluded
+unless `--include-internal` is given.
+
+```bash
+export JAZZX_TOKEN="<your token from the instance UI>"
+export KEYCLOAK_ADMIN_PASSWORD="<keycloak admin password>"
+python3 scripts/customer_access_report.py --base-url https://poc.jazzx.co --admin-user admin
+```
+
+Login history comes from the platform's own records (`GET /assistant/api/v1/user_sessions`,
+read with `JAZZX_TOKEN`). The UI writes one row each time it gets a token, so a user's
+rows less than `--gap-minutes` (default 30) apart are merged into one visit. Keycloak
+supplies the email for each user id. Without `JAZZX_TOKEN` the script falls back to
+Keycloak login events, which exist only when "Save events" is on for the realm. A UI
+URL is mapped to its `-gw` gateway host.
+
+The report is the login history as one CSV in `customer-access-reports/` (gitignored,
+because it contains customer emails and IPs), one row per visit, newest first. By default it
+covers every recorded login from the beginning through the end of today (in `--timezone`) and
+is named for that range, e.g. `poc-login-history-20261008-to-20261022.csv`. Use `--since` /
+`--until` (YYYY-MM-DD) to narrow the range, and `--markdown` to also write the Markdown summary.
+
 ## Development checks
 
 ```bash

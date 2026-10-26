@@ -15,3 +15,6 @@ clone-result.json
 app-config-audit.json
 verify-report.json
 config-audit/
+
+# Customer login reports carry customer emails and IP addresses.
+customer-access-reports/
